@@ -139,20 +139,20 @@ public class QueueHandler {
 	 * @param overrideFollowUp  :  if this parameter is true the action will be added directly to the regardless of its dependencies
 	 * @throws CoreException
 	 */
-	public synchronized void addActionToQueue( IContext context, IMendixObject actionObject, IMendixObject process, boolean overrideFollowUp, String calling_microflow_name ) throws CoreException {
+	public synchronized void addActionToQueue( IContext microflowContext, IMendixObject actionObject, IMendixObject process, boolean overrideFollowUp, String calling_microflow_name ) throws CoreException {
 
 		Long queueNr = this.processQueueConfig.get( process.getId().toLong());
 		//In case the queue number isn't cached yet, just retrieve the associated QueueConfiguration to acquire the correct queue number 
 		if( queueNr == null ) {                    
-			IMendixIdentifier queueId = process.getValue(context, Process.MemberNames.Process_QueueConfiguration.toString());
-			IMendixObject queue = Core.retrieveId(context, queueId);
+			IMendixIdentifier queueId = process.getValue(microflowContext, Process.MemberNames.Process_QueueConfiguration.toString());
+			IMendixObject queue = Core.retrieveId(microflowContext, queueId);
 			
 			//Validate that the microflow actually exists so we can throw an exception on initialization instead of while running
-			String microflowName = (String) process.getValue(context, Process.MemberNames.MicroflowFullname.toString());
+			String microflowName = (String) process.getValue(microflowContext, Process.MemberNames.MicroflowFullname.toString());
 			if( !Core.getMicroflowNames().contains(microflowName) )
-				throw new CoreException("Unable to schedule queued action: " + actionObject.getValue(context, QueuedAction.MemberNames.ActionNumber.toString()) + " / " + actionObject.getValue(context, QueuedAction.MemberNames.ReferenceText.toString()) + " the configured microflow: " + microflowName + " does not exist.");
+				throw new CoreException("Unable to schedule queued action: " + actionObject.getValue(microflowContext, QueuedAction.MemberNames.ActionNumber.toString()) + " / " + actionObject.getValue(microflowContext, QueuedAction.MemberNames.ReferenceText.toString()) + " the configured microflow: " + microflowName + " does not exist.");
 			
-			queueNr = queue.getValue(context, SharedQueueConfiguration.MemberNames.QueueRefNr.toString());
+			queueNr = queue.getValue(microflowContext, SharedQueueConfiguration.MemberNames.QueueRefNr.toString());
 			this.processQueueConfig.put(process.getId().toLong(), queueNr);
             _node.debug("Adding queue to the pool: " + queueNr );
 		}
@@ -165,7 +165,7 @@ public class QueueHandler {
 		
 		// Ticket #44229: https://mendixsupport.zendesk.com/agent/tickets/44229 -- JPU (Nov 24, 2016)
 		// added check to see if prevAction was already successfully completed to avoid followup action waiting indefinitely without ever executing.
-		IMendixIdentifier prevActionId = actionObject.getValue(context, QueuedAction.MemberNames.FollowupAction_PreviousAction.toString());
+		IMendixIdentifier prevActionId = actionObject.getValue(microflowContext, QueuedAction.MemberNames.FollowupAction_PreviousAction.toString());
 		boolean addToQueue = false;
 		if (overrideFollowUp == true) {
 			addToQueue = true;
@@ -173,10 +173,10 @@ public class QueueHandler {
 		else if (prevActionId == null )
 			addToQueue = true;
 		else { //(prevActionId != null)
-			QueuedAction prevAction = QueuedAction.load(context, prevActionId);
+			QueuedAction prevAction = QueuedAction.load(microflowContext, prevActionId);
 			addToQueue = 
-				prevAction.getStatus(context) == LogExecutionStatus.SuccesExecuted || 
-				prevAction.getStatus(context) == LogExecutionStatus.SuccesWithErrorsExecuted;
+				prevAction.getStatus(microflowContext) == LogExecutionStatus.SuccesExecuted || 
+				prevAction.getStatus(microflowContext) == LogExecutionStatus.SuccesWithErrorsExecuted;
 		}
 			
 		if( addToQueue == true ) {
@@ -186,7 +186,7 @@ public class QueueHandler {
 			ThreadPoolExecutor tPool = this.queueMap.get(queueNr);
 			if(tPool != null)
 			{
-				ObjectQueueExecutor thread = new ObjectQueueExecutor(context, actionObject, process, calling_microflow_name);
+				ObjectQueueExecutor thread = new ObjectQueueExecutor(microflowContext, actionObject, process, calling_microflow_name);
 				tPool.execute(thread);
 			} else
 			{
@@ -194,7 +194,7 @@ public class QueueHandler {
 			}
 		}
 		else {
-			_node.debug("Skipping the ActionQueue, the action is a follow up action (" + actionObject.getValue(context, QueuedAction.MemberNames.ActionNumber.toString()) + ") ");
+			_node.debug("Skipping the ActionQueue, the action is a follow up action (" + actionObject.getValue(microflowContext, QueuedAction.MemberNames.ActionNumber.toString()) + ") ");
 		}
 	}
 	

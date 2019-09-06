@@ -3,15 +3,7 @@ package processqueue.queuehandler;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.util.Date;
-import java.util.HashMap;
 import java.util.List;
-
-import processqueue.proxies.ActionStatus;
-import processqueue.proxies.LogExecutionStatus;
-import processqueue.proxies.LogReason;
-import processqueue.proxies.Process;
-import processqueue.proxies.QueuedAction;
-import processqueue.proxies.microflows.Microflows;
 
 import com.mendix.core.Core;
 import com.mendix.core.CoreException;
@@ -19,6 +11,14 @@ import com.mendix.logging.ILogNode;
 import com.mendix.systemwideinterfaces.core.IContext;
 import com.mendix.systemwideinterfaces.core.IMendixIdentifier;
 import com.mendix.systemwideinterfaces.core.IMendixObject;
+
+import processqueue.proxies.ActionStatus;
+import processqueue.proxies.ExecutionLog;
+import processqueue.proxies.LogExecutionStatus;
+import processqueue.proxies.LogReason;
+import processqueue.proxies.Process;
+import processqueue.proxies.QueuedAction;
+import processqueue.proxies.microflows.Microflows;
 
 /**
  * This class is responsible for executing the configured Microflow and updating the QueuedAction object afterwards with the correct status.
@@ -56,9 +56,9 @@ public class ObjectQueueExecutor implements Runnable {
 		threadFinished;
 	}
 
-	public ObjectQueueExecutor( IContext context, IMendixObject action, IMendixObject process, String calling_microflow_name ) 
+	public ObjectQueueExecutor( IContext microflowContext, IMendixObject action, IMendixObject process, String calling_microflow_name ) 
 	{
-		this.context = context;
+		this.context = Core.createSystemContext();
 		this.QAGuid = action.getId().toLong();
 		this.callingMicroflowName = calling_microflow_name;
 		this.actionNr = action.getValue(this.context, QueuedAction.MemberNames.ActionNumber.toString());
@@ -66,33 +66,17 @@ public class ObjectQueueExecutor implements Runnable {
 		this.microflowName = (String) process.getValue(this.context, Process.MemberNames.MicroflowFullname.toString());
 		
 		this.action = action;
-		this.action.setValue(this.context, QueuedAction.MemberNames.Phase.toString(), ActionStatus.Queued.toString());
+		this.action.setValue(microflowContext, QueuedAction.MemberNames.Phase.toString(), ActionStatus.Queued.toString());
 		
 		//Make sure we commit the latest info so status changes always get updated in the client as soon as possible.
 		// E.g. actions being set to "Queued".
 		if( this.action.isNew() || this.action.isChanged() ) { 
 			try {
-				Core.commit( this.context, this.action );
+				Core.commit( microflowContext, this.action );
 			} catch (Exception e) {
 				_logNode.error("Error while trying to commit QueuedAction " + this.action.getValue(this.context, QueuedAction.MemberNames.ActionNumber.toString()) + " from queue", e);		
 			}
 		}
-	}
-	
-	public void initializeAction(ActionStatus phase, LogExecutionStatus status ) {
-		this.action.setValue(this.context, QueuedAction.MemberNames.Phase.toString(), phase.toString());
-		this.action.setValue(this.context, QueuedAction.MemberNames.Status.toString(), status.toString());
-		this.action.setValue(this.context, QueuedAction.MemberNames.StartTime.toString(), new Date());
-		
-		try {
-			Core.commit( this.context, this.action );
-		} catch (Exception e) {
-			_logNode.error("Error while trying to commit QueuedAction " + this.action.getValue(this.context, QueuedAction.MemberNames.ActionNumber.toString()) + " from queue", e);		
-		}
-	}
-
-	public void setQueueNumber(int queueNr) {
-		this.action.setValue(this.context, QueuedAction.MemberNames.QueueNumber.toString(), queueNr);
 	}
 	
 	
@@ -159,9 +143,18 @@ public class ObjectQueueExecutor implements Runnable {
 				this.action = qaResult.get(0);
 				
 				_logNode.debug("Running QueuedAction: [" + this.QAGuid + "]");
-				// Set the action as busy.
 
-				initializeAction(ActionStatus.Running, LogExecutionStatus.While_Executing);
+				// Set the action as busy.
+				this.action.setValue(this.context, QueuedAction.MemberNames.Phase.toString(), ActionStatus.Running.toString());
+				this.action.setValue(this.context, QueuedAction.MemberNames.Status.toString(), LogExecutionStatus.While_Executing.toString()	);
+				this.action.setValue(this.context, QueuedAction.MemberNames.StartTime.toString(), new Date());
+				try {
+					Core.commit( this.context, this.action );
+				} catch (Exception e) {
+					_logNode.error("Error while trying to commit QueuedAction " + this.action.getValue(this.context, QueuedAction.MemberNames.ActionNumber.toString()) + " from queue", e);		
+				}
+
+				
 				this._state = State.executingMicroflow;
 				Boolean microflowResult = null;  //Initialize the variable with false, in case the microflow throws an exception we want it to be value: false
 				try 
@@ -188,18 +181,18 @@ public class ObjectQueueExecutor implements Runnable {
 					} finally {
 						// while should not be necessary but sometimes is, unclear as to why... 
 						// possibly a Runtime issue - found by Bart Luijten & Danny Roest - JUL 16
-						
 						while (this.context.isInTransaction()) {
 							this.context.endTransaction();
 						}
 					}
 					
-					setQueueNumber(0);
+					this.action.setValue(this.context, QueuedAction.MemberNames.QueueNumber.toString(), 0);
+					
 					if( microflowResult != null ) {
 						if ( microflowResult == true ) {
 							setExecutionLog(LogExecutionStatus.SuccesExecuted, ActionStatus.Finished);
 						} else {
-							setExecutionLog(LogExecutionStatus.FailedExecuted, ActionStatus.Cancelled);
+							setExecutionLog(LogExecutionStatus.SuccesWithErrorsExecuted, ActionStatus.Cancelled);
 						}
 					}
 					this._state = State.executionStatusUpdated;
@@ -245,35 +238,68 @@ public class ObjectQueueExecutor implements Runnable {
 		{
 			_logNode.debug("Exception: ", stacktrace);
 
-			HashMap<String, Object> paramMap = new HashMap<String, Object>();
-			paramMap.put("QueuedAction", queuedAction);
-			paramMap.put("LogExecutionStatus", status.toString());
-			paramMap.put("LogReason", LogReason.Exception.toString());
-			paramMap.put("ErrorMessage", error);
-			paramMap.put("StackTrace", stackTraceToString(stacktrace));
-			paramMap.put("Phase", phase.toString());
-			Core.execute(context, "ProcessQueue.SF_WriteExecutionLog", paramMap);
+			switch( LogExecutionStatus.valueOf(queuedAction.getValue(context, QueuedAction.MemberNames.Status.toString())) ) {
+			case SuccesExecuted:
+				if( status == LogExecutionStatus.FailedExecuted ) 
+					queuedAction.setValue(context, QueuedAction.MemberNames.Status.toString(), LogExecutionStatus.SuccesWithErrorsExecuted.toString());
+				else 
+					queuedAction.setValue(context, QueuedAction.MemberNames.Status.toString(), LogExecutionStatus.FailedExecuted.toString());
+				break;
+
+			case FailedExecuted:
+				if( status == LogExecutionStatus.SuccesExecuted ) 
+					queuedAction.setValue(context, QueuedAction.MemberNames.Status.toString(), LogExecutionStatus.SuccesWithErrorsExecuted.toString());
+				else 
+					queuedAction.setValue(context, QueuedAction.MemberNames.Status.toString(), LogExecutionStatus.FailedExecuted.toString());
+				break;
+			case While_Executing:
+				if( status == LogExecutionStatus.SuccesExecuted ) 
+					queuedAction.setValue(context, QueuedAction.MemberNames.Status.toString(), LogExecutionStatus.SuccesExecuted.toString());
+				else 
+					queuedAction.setValue(context, QueuedAction.MemberNames.Status.toString(), LogExecutionStatus.FailedExecuted.toString());
+				break;
+
+			case NotExecuted:
+			case Skipped:
+				if( status == LogExecutionStatus.Skipped ) 
+					queuedAction.setValue(context, QueuedAction.MemberNames.Status.toString(), LogExecutionStatus.Skipped.toString());
+				break;
+				
+			case SuccesWithErrorsExecuted:
+				queuedAction.setValue(context, QueuedAction.MemberNames.Status.toString(), LogExecutionStatus.SuccesWithErrorsExecuted.toString());
+				break;
+			}
+			
+			queuedAction.setValue(context, QueuedAction.MemberNames.FinishTime.toString(), new Date());
+			queuedAction.setValue(context, QueuedAction.MemberNames.Phase.toString(), phase.toString());
+			Core.commit(context, queuedAction);
+			
+
+			IMendixObject execLog = Core.instantiate(context, ExecutionLog.entityName);
+			execLog.setValue(context, ExecutionLog.MemberNames.ExecutionLog_QueuedAction.toString(), queuedAction.getId());
+			
+			if( error != null || stacktrace != null ) {
+				execLog.setValue(context, ExecutionLog.MemberNames.ErrorMessage.toString(), (error.length() > 500 ? error.substring(0,500) : error));
+				execLog.setValue(context, ExecutionLog.MemberNames.Stacktrace.toString(), stackTraceToString(stacktrace));
+				execLog.setValue(context, ExecutionLog.MemberNames.Reason.toString(), LogReason.Exception.toString());
+			}
+			else 
+				execLog.setValue(context, ExecutionLog.MemberNames.Reason.toString(), LogReason.Notification.toString());
+				
+			execLog.setValue(context, ExecutionLog.MemberNames.ExecutionStatus.toString(), status.toString());
+			Core.commit(context, execLog);
+
 		} catch (CoreException e) {
-			_logNode.error("Error while setting log message with stacktrace and error message", e);
+			if( stacktrace != null || error != null )
+				_logNode.error("Error while setting log message with stacktrace and error message", e);
+			else 
+				_logNode.error("Error while setting execution log status: " + status , e);
 		}
 	}
 	
 	private void setExecutionLog(LogExecutionStatus status, ActionStatus phase)
 	{
-		try 
-		{
-			HashMap<String, Object> paramMap = new HashMap<String, Object>();
-			paramMap.put("QueuedAction", this.action);
-			paramMap.put("LogExecutionStatus", status.toString());
-			paramMap.put("LogReason", LogReason.Notification.toString());
-			paramMap.put("ErrorMessage", null);
-			paramMap.put("StackTrace", null);
-			paramMap.put("Phase", phase.toString());
-			
-			Core.execute(this.context, "ProcessQueue.SF_WriteExecutionLog", paramMap);
-		} catch (CoreException e) {
-			_logNode.error("Error while setting execution log status: " + status , e);
-		}
+		setErrormessageAndCommit(context, this.action, null, null, status, phase);
 	}
 	
 	/**
